@@ -438,7 +438,11 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		}
 		metrics.ProxyUpstreamTime.WithLabelValues(metrics.ErrorTimeout, metrics.L7DNS, upstream).Observe(
 			stat.UpstreamTime.Total().Seconds())
+		metrics.ProxyUpstreamTimeObserver.WithLabelValues(metricError, metrics.L7DNS, processingTime).Observe(
+			stat.UpstreamTime.Total().Seconds())
 		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, processingTime).Observe(
+			stat.ProcessingTime.Total().Seconds())
+		metrics.ProxyUpstreamTimeObserver.WithLabelValues(metricError, metrics.L7DNS, processingTime).Observe(
 			stat.ProcessingTime.Total().Seconds())
 		metrics.ProxyUpstreamTime.WithLabelValues(metricError, metrics.L7DNS, semaphoreTime).Observe(
 			stat.SemaphoreAcquireTime.Total().Seconds())
