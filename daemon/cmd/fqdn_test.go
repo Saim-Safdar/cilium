@@ -120,7 +120,9 @@ func (f *FakeRefcountingIdentityAllocator) WatchRemoteIdentities(kvstore.Backend
 }
 
 func (ds *DaemonFQDNSuite) SetUpTest(c *C) {
-	d := &Daemon{}
+	d := &Daemon{
+		notifyOnDNSMsgMu: new(lock.Mutex),
+	}
 	d.identityAllocator = NewFakeIdentityAllocator(nil)
 	d.policy = policy.NewPolicyRepository(d.identityAllocator, nil, nil)
 	d.dnsNameManager = fqdn.NewNameManager(fqdn.Config{

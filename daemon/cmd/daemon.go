@@ -129,6 +129,10 @@ type Daemon struct {
 	// dnsNameManager tracks which api.FQDNSelector are present in policy which
 	// apply to locally running endpoints.
 	dnsNameManager *fqdn.NameManager
+	// notifyOnDNSMsgMu is used to serialized the critical path of
+	// notifyOnDNSMsg() to ensure that identity allocation and ipcache
+	// insertion happen atomically between parallel DNS request handling.
+	notifyOnDNSMsgMu *lock.Mutex
 
 	// Used to synchronize generation of daemon's BPF programs and endpoint BPF
 	// programs.
@@ -455,6 +459,7 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
 		prefixLengths:     createPrefixLengthCounter(),
 		buildEndpointSem:  semaphore.NewWeighted(int64(numWorkerThreads())),
 		compilationMutex:  new(lock.RWMutex),
+		notifyOnDNSMsgMu:  new(lock.Mutex),
 		netConf:           netConf,
 		mtuConfig:         mtuConfig,
 		datapath:          dp,

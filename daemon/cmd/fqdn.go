@@ -580,6 +580,39 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 	record.Log()
 
 	if msg.Response && msg.Rcode == dns.RcodeSuccess && len(responseIPs) > 0 {
+		// Create a critical section especially for when multiple DNS requests
+		// are in-flight for the same name (i.e. cilium.io).
+		//
+		// It is possible for the following race to occurr:
+		//
+		//              G1                               G2
+		//
+		// T0 --> NotifyOnDNSMsg()               NotifyOnDNSMsg()            <-- T0
+		//
+		// T1 --> UpdateGenerateDNS()            UpdateGenerateDNS()         <-- T1
+		//
+		//   T2 --> mutex.Lock()                 +---------------------------+
+		//                                       |No identities need updating|
+		//   T3 --> mutex.Unlock()               +---------------------------+
+		//
+		// T4 --> UpsertGeneratedIdentities()    UpsertGeneratedIdentities() <-- T4
+		//
+		//   T5 --> Upsert()                     DNS released back to app    <-- T5
+		//                                               |
+		// T6 --> DNS released back to app               |
+		//              |                                |
+		//              |                                |
+		//              v                                v
+		//       Traffic flows fine                Leads to policy drop
+		//
+		// Note how G2 releases the DNS msg back to the app at T5 because
+		// UpdateGenerateDNS() was a no-op. G1 had executed UpdateGenerateDNS()
+		// first at T1 and performed the necessary identitiy allocation. Due to
+		// G1 performing all the work first, G2 executes T4 as a no-op and
+		// releases the msg back to the app at T5 before G1 can.
+		d.notifyOnDNSMsgMu.Lock()
+		defer d.notifyOnDNSMsgMu.Unlock()
+
 		stat.DataplaneTime.Start()
 		// This must happen before the NameManager update below, to ensure that
 		// this data is included in the serialized Endpoint object.
