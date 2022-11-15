@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !privileged_tests
 // +build !privileged_tests
 
 package cmd
@@ -23,21 +24,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/counter"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/fqdn"
 	"github.com/cilium/cilium/pkg/fqdn/dns"
+	"github.com/cilium/cilium/pkg/fqdn/dnsproxy"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 
+	miekgdns "github.com/miekg/dns"
 	. "gopkg.in/check.v1"
 	k8sCache "k8s.io/client-go/tools/cache"
 )
@@ -158,6 +163,87 @@ func (ds *DaemonSuite) BenchmarkFqdnCache(c *C) {
 	c.StartTimer()
 
 	extractDNSLookups(endpoints, "0.0.0.0/0", "*")
+}
+
+// Benchmark_notifyOnDNSMsg stresses the main callback function for the DNS
+// proxy path, which is called on every DNS request and response.
+func (ds *DaemonFQDNSuite) Benchmark_notifyOnDNSMsg(c *C) {
+	var (
+		nameManager             = ds.d.dnsNameManager
+		ciliumIOSel             = api.FQDNSelector{MatchName: "cilium.io"}
+		ciliumIOSelMatchPattern = api.FQDNSelector{MatchPattern: "*cilium.io."}
+		ebpfIOSel               = api.FQDNSelector{MatchName: "ebpf.io"}
+		ciliumDNSRecord         = map[string]*fqdn.DNSIPRecords{
+			dns.FQDN("cilium.io"): {TTL: 60, IPs: []net.IP{net.ParseIP("192.0.2.3")}},
+		}
+		ebpfDNSRecord = map[string]*fqdn.DNSIPRecords{
+			dns.FQDN("ebpf.io"): {TTL: 60, IPs: []net.IP{net.ParseIP("192.0.2.4")}},
+		}
+
+		wg sync.WaitGroup
+	)
+
+	// Register rules (simulates applied policies).
+	selectorsToAdd := api.FQDNSelectorSlice{ciliumIOSel, ciliumIOSelMatchPattern, ebpfIOSel}
+	nameManager.Lock()
+	for _, sel := range selectorsToAdd {
+		nameManager.RegisterForIdentityUpdatesLocked(sel)
+	}
+	nameManager.Unlock()
+
+	// Initialize the endpoints.
+	endpoints := make([]*endpoint.Endpoint, c.N)
+	for i := range endpoints {
+		endpoints[i] = &endpoint.Endpoint{
+			ID:   uint16(c.N % 65000),
+			IPv4: addressing.DeriveCiliumIPv4(net.ParseIP(fmt.Sprintf("10.96.%d.%d", c.N%8, c.N%256))),
+			SecurityIdentity: &identity.Identity{
+				ID: identity.NumericIdentity(c.N % int(identity.MaximumAllocationIdentity)),
+			},
+			DNSZombies: &fqdn.DNSZombieMappings{
+				Mutex: lock.Mutex{},
+			},
+		}
+		ep := endpoints[i]
+		ep.UpdateLogger(nil)
+		ep.DNSHistory = fqdn.NewDNSCache(0)
+	}
+
+	c.ResetTimer()
+	// Simulate parallel DNS responses from the upstream DNS for cilium.io and
+	// ebpf.io, done by every endpoint.
+	for i := 0; i < c.N; i++ {
+		go func(ep *endpoint.Endpoint) {
+			wg.Add(1)
+			defer wg.Done()
+			c.Assert(ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.8:12345", "10.96.64.1:53", &miekgdns.Msg{
+				MsgHdr: miekgdns.MsgHdr{
+					Response: true,
+				},
+				Question: []miekgdns.Question{{
+					Name: dns.FQDN("cilium.io"),
+				}},
+				Answer: []miekgdns.RR{&miekgdns.A{
+					Hdr: miekgdns.RR_Header{Name: dns.FQDN("cilium.io")},
+					A:   ciliumDNSRecord[dns.FQDN("cilium.io")].IPs[0],
+				}}}, "udp", true, &dnsproxy.ProxyRequestContext{}), IsNil)
+
+			c.Assert(ds.d.notifyOnDNSMsg(time.Now(), ep, "10.96.64.4:54321", "10.96.64.1:53", &miekgdns.Msg{
+				MsgHdr: miekgdns.MsgHdr{
+					Response: true,
+				},
+				Compress: false,
+				Question: []miekgdns.Question{{
+					Name: dns.FQDN("ebpf.io"),
+				}},
+				Answer: []miekgdns.RR{&miekgdns.A{
+					Hdr: miekgdns.RR_Header{Name: dns.FQDN("ebpf.io")},
+					A:   ebpfDNSRecord[dns.FQDN("ebpf.io")].IPs[0],
+				}}}, "udp", true, &dnsproxy.ProxyRequestContext{}), IsNil)
+		}(endpoints[i%len(endpoints)])
+	}
+
+	wg.Wait()
 }
 
 func (ds *DaemonFQDNSuite) TestFQDNIdentityReferenceCounting(c *C) {
