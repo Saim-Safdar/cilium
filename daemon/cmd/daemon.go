@@ -132,7 +132,7 @@ type Daemon struct {
 	// notifyOnDNSMsgMu is used to serialized the critical path of
 	// notifyOnDNSMsg() to ensure that identity allocation and ipcache
 	// insertion happen atomically between parallel DNS request handling.
-	notifyOnDNSMsgMu *lock.Mutex
+	notifyOnDNSMsgMu []*lock.Mutex
 
 	// Used to synchronize generation of daemon's BPF programs and endpoint BPF
 	// programs.
@@ -459,13 +459,16 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
 		prefixLengths:     createPrefixLengthCounter(),
 		buildEndpointSem:  semaphore.NewWeighted(int64(numWorkerThreads())),
 		compilationMutex:  new(lock.RWMutex),
-		notifyOnDNSMsgMu:  new(lock.Mutex),
+		notifyOnDNSMsgMu:  make([]*lock.Mutex, 128),
 		netConf:           netConf,
 		mtuConfig:         mtuConfig,
 		datapath:          dp,
 		nodeDiscovery:     nd,
 		endpointCreations: newEndpointCreationManager(),
 		apiLimiterSet:     apiLimiterSet,
+	}
+	for i := range d.notifyOnDNSMsgMu {
+		d.notifyOnDNSMsgMu[i] = new(lock.Mutex)
 	}
 
 	if option.Config.RunMonitorAgent {

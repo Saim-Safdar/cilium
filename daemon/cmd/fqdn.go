@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -610,8 +612,11 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 		// first at T1 and performed the necessary identitiy allocation. Due to
 		// G1 performing all the work first, G2 executes T4 as a no-op and
 		// releases the msg back to the app at T5 before G1 can.
-		d.notifyOnDNSMsgMu.Lock()
-		defer d.notifyOnDNSMsgMu.Unlock()
+		mutexes := d.getMutexesForResponseIPs(responseIPs)
+		for _, m := range mutexes {
+			d.notifyOnDNSMsgMu[m].Lock()
+			defer d.notifyOnDNSMsgMu[m].Unlock()
+		}
 
 		stat.DataplaneTime.Start()
 		// This must happen before the NameManager update below, to ensure that
@@ -672,6 +677,40 @@ func (d *Daemon) notifyOnDNSMsg(lookupTime time.Time, ep *endpoint.Endpoint, epI
 
 	stat.ProcessingTime.End(true)
 	return nil
+}
+
+// getMutexesForResponseIPs returns a slice of indices for accessing the
+// mutexes in notifyOnDNSMsgMu. There's a many-to-one mapping from IP to mutex,
+// meaning multiple IPs may map to a single mutex. In order to prevent the
+// caller from acquiring the mutexes in an undesirable order, this function
+// ensures that the slice returned is sorted from the smallest index to the
+// largest. This is the order in which the mutexes should be taken and
+// released. The slice is de-duplicated. The many-to-one property is obtained
+// by hashing each IP inside responseIPs.
+func (d *Daemon) getMutexesForResponseIPs(responseIPs []net.IP) []int {
+	mod := big.NewInt(128)
+	// cache stores all indices for unique mutexes. Prevents the same mutex
+	// index from being added to indices which prevents the caller from
+	// attempting to acquire the same mutex multiple times.
+	cache := make(map[int]struct{}, len(responseIPs))
+	indices := make([]int, 0, len(responseIPs))
+	for _, ip := range responseIPs {
+		h := ipToInt(ip)
+		m := h.Mod(h, mod)
+		i := int(m.Int64())
+		if _, exists := cache[i]; !exists {
+			cache[i] = struct{}{}
+			indices = append(indices, i)
+		}
+	}
+	sort.Ints(indices)
+	return indices
+}
+
+func ipToInt(addr net.IP) *big.Int {
+	i := big.NewInt(0)
+	i.SetBytes(addr)
+	return i
 }
 
 type getFqdnCache struct {

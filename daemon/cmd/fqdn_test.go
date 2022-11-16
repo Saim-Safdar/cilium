@@ -121,7 +121,10 @@ func (f *FakeRefcountingIdentityAllocator) WatchRemoteIdentities(kvstore.Backend
 
 func (ds *DaemonFQDNSuite) SetUpTest(c *C) {
 	d := &Daemon{
-		notifyOnDNSMsgMu: new(lock.Mutex),
+		notifyOnDNSMsgMu: make([]*lock.Mutex, 128),
+	}
+	for i := range d.notifyOnDNSMsgMu {
+		d.notifyOnDNSMsgMu[i] = new(lock.Mutex)
 	}
 	d.identityAllocator = NewFakeIdentityAllocator(nil)
 	d.policy = policy.NewPolicyRepository(d.identityAllocator, nil, nil)
@@ -307,4 +310,24 @@ func (ds *DaemonFQDNSuite) TestFQDNIdentityReferenceCounting(c *C) {
 	wg.Wait()
 	c.Assert(idAllocator.IdentityReferenceCounter(), checker.DeepEquals, counter.IntCounter{},
 		Commentf("The Daemon code leaked references to one or more identities"))
+}
+
+func (ds *DaemonFQDNSuite) Test_getMutexesForResponseIPs(c *C) {
+	r := make([]net.IP, 0)
+	for i := 0; i < 64; i++ {
+		r = append(r, net.ParseIP(fmt.Sprintf("1.1.1.%d", i)))
+	}
+	m := ds.d.getMutexesForResponseIPs(r)
+	c.Assert(m, HasLen, 64)
+	c.Assert(m[0], Equals, 0)
+	c.Assert(m[len(m)-1], Equals, len(m)-1)
+
+	r = make([]net.IP, 0)
+	for i := 0; i < 64; i++ {
+		r = append(r, net.ParseIP(fmt.Sprintf("1.%d.1.1", i)))
+	}
+	m = ds.d.getMutexesForResponseIPs(r)
+	fmt.Println(m)
+	c.Assert(m, HasLen, 1)
+	c.Assert(m[0], Equals, 1)
 }
