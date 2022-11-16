@@ -355,6 +355,11 @@ Helm Options
   ``securityContext.capabilities.cilium_agent``.
 * ``bpf.hostLegacyRouting`` will be set to true automatically if ``cni.chainingMode`` is set to any other value than ``none`` (default) 
 
+CRD Changes
+~~~~~~~~~~~
+
+* ``CiliumBGPLoadBalancerIPPool`` CRD has been renamed to ``CiliumLoadBalancerIPPool``.
+
 .. _1.12_upgrade_notes:
 
 1.12 Upgrade Notes
